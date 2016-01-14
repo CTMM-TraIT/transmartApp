@@ -24,7 +24,9 @@ class ExternalProcessAppender extends AppenderSkeleton {
     protected Writer input
     protected boolean failed = false
 
-    private ThreadLocal<Integer> recursionCount = new ThreadLocal<Integer>()
+    private ThreadLocal<int[]> recursionCount = [
+        initialValue: { [0] as int[] }
+    ] as ThreadLocal<int[]>
 
     void setRestartLimit(int l) {
         if (l < 0) throw new InvalidArgumentsException("restartLimit cannot be negative (use 0 to disable the limit)")
@@ -89,7 +91,7 @@ class ExternalProcessAppender extends AppenderSkeleton {
 
     private synchronized boolean restartChild() {
         failcount++
-        int restartWindowEnd = starttime + restartWindow * 1000
+        int restartWindowEnd = starttime + ((long) restartWindow) * 1000L
         long now = System.currentTimeMillis()
         boolean inWindow = restartLimit == 0 ? false : now > restartWindowEnd
         if (restartLimit != 0 && inWindow && failcount > restartLimit) {
