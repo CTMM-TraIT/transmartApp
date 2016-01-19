@@ -1,16 +1,16 @@
 package org.transmart
 
 import com.google.common.base.Charsets
+import grails.converters.JSON
 import groovy.transform.CompileStatic
 import groovy.util.logging.Log4j
 import org.apache.log4j.AppenderSkeleton
 import org.apache.log4j.spi.LoggingEvent
-import org.transmartproject.core.exceptions.InvalidArgumentsException
 
 import static java.lang.ProcessBuilder.Redirect.*
 
-@Log4j
 @CompileStatic
+@Log4j
 class ExternalProcessAppender extends AppenderSkeleton {
 
     List<String> command
@@ -22,38 +22,29 @@ class ExternalProcessAppender extends AppenderSkeleton {
     protected int failcount = 0
     protected Process process
     protected Writer input
-    protected boolean failed = false
+
+    // The appender being broken should be unlikely. It indicates a misconfiguration or an error in the child program.
+    protected boolean broken = false
 
     private ThreadLocal<int[]> recursionCount = [
         initialValue: { [0] as int[] }
     ] as ThreadLocal<int[]>
 
     void setRestartLimit(int l) {
-        if (l < 0) throw new InvalidArgumentsException("restartLimit cannot be negative (use 0 to disable the limit)")
+        if (l < 0) throw new IllegalArgumentException("restartLimit cannot be negative (use 0 to " +
+                "disable the limit)")
         this.restartLimit = l
     }
 
     void setRestartWindow(int w) {
-        if (w <= 0) throw new InvalidArgumentsException("restartWindow must be larger than 0")
+        if (w <= 0) throw new IllegalArgumentException("restartWindow must be larger than 0")
         this.restartWindow = w
     }
 
-    ExternalProcessAppender() {
-        recursionCount.set(0)
+    ExternalProcessAppender(Map<String,Object> opts) {
+        println "foo"
+        opts?.each { String prop, val -> println "setting $prop";  metaClass.setProperty(this, prop, val) }
     }
-
-//    ExternalProcessAppender(Map<String, Object> opts) {
-//        name = (String) opts.name
-//        assert name, "No valid name : String provided"
-//        command = (List<String>) opts.command
-//        assert command, "No valid command : List<String> provided"
-//        restartLimit = (int) opts.get("restartLimit", 10)
-//        assert restartLimit >= 0, "No valid restartLimit : int >= 0 provided (0 for indefinite restarts)"
-//        restartWindow = (int) opts.get("restartWindow", 10)
-//        if (restartLimit) {
-//            assert restartWindow > 0, "No valid restartWindow : int > 0 provided"
-//        }
-//    }
 
     private synchronized startProcess() {
         if (process == null) {
@@ -73,47 +64,75 @@ class ExternalProcessAppender extends AppenderSkeleton {
         }
     }
 
-    private synchronized write(String str) {
-        boolean retry = true
-        while (retry) {
-            try {
-                input.write(str)
-                input.flush()
-                return
-            } catch (IOException e) {
-                if (childAlive) {
-                    throw e
-                }
-                retry = restartChild()
-            }
-        }
-    }
-
-    private synchronized boolean restartChild() {
+    private synchronized String restartChild() {
         failcount++
-        int restartWindowEnd = starttime + ((long) restartWindow) * 1000L
+        long restartWindowEnd = starttime + restartWindow * 1000
         long now = System.currentTimeMillis()
         boolean inWindow = restartLimit == 0 ? false : now > restartWindowEnd
         if (restartLimit != 0 && inWindow && failcount > restartLimit) {
-            failed = true
-            return false
+            broken = true
+            // Don't log from here while we are synchronized, that would cause a deadlock condition
+            return "Failed to restart external log handling process \"${command.join(' ')}\", failed $failcount times" +
+                    " in $restartWindow seconds"
         }
         input.close()
         if (!inWindow) {
             starttime = now
         }
         startProcess()
-        return true
+        return null
     }
 
-    static breakpoint() {
-        //log.info("In test breakpoint")
-        //sleep(10000)
+    void write(String str) {
+        int[] rc = recursionCount.get()
+        int oldrc = rc[0]
+        try {
+            rc[0]++
+            // Recursive call, ignore
+            if (rc[0] > 1) return
+
+            if (broken) {
+                log.warn("Attempting to write to broken external log handling process")
+                return
+            }
+
+            String errmsg = null
+            // input.write and input.flush synchronize, so there is no use in optimizing away this synchronized block
+            // in the normal flow.
+            synchronized (this) {
+                while (errmsg == null) {
+                    try {
+                        input.write(str)
+                        input.flush()
+                        return
+                    } catch (IOException e) {
+                        if (childAlive) {
+                            broken = true
+                            throw e
+                        }
+                        errmsg = restartChild()
+                    }
+                }
+            }
+
+            assert errmsg != null
+            // Log outside of the synchronized block
+            log.error(errmsg)
+            if (throwOnFailure) {
+                throw new Exception(errmsg)
+            }
+        } finally {
+            rc[0] = oldrc
+        }
     }
 
     void append(LoggingEvent event) {
+        // Check for recursive invocation
+        if (recursionCount.get()[0] > 0) return;
 
-        System.currentTimeMillis()
+        // convert to JSON outside of the lock
+        JSON msg = [message: event.toString()] as JSON
+        write(msg.toString())
     }
 
     @Override
